@@ -13,7 +13,7 @@ I was tired to install printers manually in little environments with no Active D
 #### 1.  Download printer driver
 
 - Download the "inf driver" for your printer. Usually it's smaller than others and it's named *no installer*, *Add Printer Wizard Driver*, or similar. 
-- Extract the driver in the same folder of this script.
+- Extract the driver in a subfolder of the script folder.
 
 #### 2. Discover driver_inf and driver_name
 
