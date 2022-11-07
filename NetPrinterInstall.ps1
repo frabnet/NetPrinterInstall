@@ -13,7 +13,7 @@ If (Test-Path -Path $ConfigFileName) {
     While ( (-Not $Host.UI.RawUI.KeyAvailable) -And  ($Sec -gt 0 )) {
         Write-Host "Setup of the new printer will start in $($Sec) seconds."
         Write-Host "Press any key to enter Setup, or close this window to abort."
-        (Get-Host).UI.RawUI.CursorPosition = @{ x = 0; y = (Get-Host).UI.RawUI.CursorPosition.Y-2 }
+        $Host.UI.RawUI.CursorPosition = @{ x = 0; y = $Host.UI.RawUI.CursorPosition.Y-2 }
         Sleep 1
         $Sec--
     }
@@ -21,7 +21,7 @@ If (Test-Path -Path $ConfigFileName) {
     Write-Host ""
     Write-Host ""
     $Setup = ($Sec -gt 0)
-    If ($Setup) { $Dummy = $host.UI.RawUI.ReadKey("NoEcho, IncludeKeyUp") }
+    If ($Setup) { $Dummy = $Host.UI.RawUI.ReadKey("NoEcho, IncludeKeyUp") }
 } Else {
     $Setup = $True  
 }
@@ -84,17 +84,23 @@ If ($Setup) {
 
     #Create menu for user selection
     $MenuList = @()
-    $Drivers | ForEach { $MenuList += "$($_.Name) ($($_.InfPath))" }
+    $MaxLength = $Host.UI.RawUI.MaxWindowSize.Width - 55
+    $Drivers | ForEach {
+        $MenuItem = "$($_.Name) ($($_.InfPath))"
+        #Try to avoid Show-Menu mess with long menu entries
+        If ( $MenuItem.Length -gt $MaxLength ) { $MenuItem = $MenuItem.Substring( 0, $MaxLength) }
+        $MenuList += $MenuItem
+    }
     $Chosen = Show-Menu -MenuItems $MenuList -ReturnIndex
     $configFile.Settings.Add.Driver = [string]$Drivers[$Chosen].Name
     $configFile.Settings.Add.InfPath = [string]$Drivers[$Chosen].InfPath
     #Write-Host ""
 
     #Try to clean Show-Menu mess in some conditions
-    $strPad = " ".PadLeft( (Get-Host).UI.RawUI.MaxWindowSize.Width - 1 , ' ' )
+    $strPad = " ".PadLeft( $Host.UI.RawUI.MaxWindowSize.Width - 1 , ' ' )
     Write-Host $strPad
     Write-Host $strPad -NoNewline
-    (Get-Host).UI.RawUI.CursorPosition = @{ x = 0; y = (Get-Host).UI.RawUI.CursorPosition.Y }
+    $Host.UI.RawUI.CursorPosition = @{ x = 0; y = $Host.UI.RawUI.CursorPosition.Y }
 
     #Get Settings.Add.Name
     Start-Job $Suggestion -ArgumentList $configFile.Settings.Add.Driver | Out-Null
