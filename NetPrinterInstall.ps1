@@ -3,27 +3,40 @@ Write-Host "https://github.com/frabnet/NetPrinterInstall" -ForegroundColor Green
 Write-Host "---"
 Write-Host ""
 
-$ConfigFileName = "NetPrinterInstallConfig.xml"
+$ConfigFileName = Join-Path $PSScriptRoot "NetPrinterInstallConfig.xml"
 
-$Setup = $False
-#Check for config file presence
-If (Test-Path -Path $ConfigFileName) {
-    $Timeout = 5
-    $Sec = $Timeout
-    While ( (-Not $Host.UI.RawUI.KeyAvailable) -And  ($Sec -gt 0 )) {
-        Write-Host "Setup of the new printer will start in $($Sec) seconds."
-        Write-Host "Press any key to enter Setup, or close this window to abort."
-        $Host.UI.RawUI.CursorPosition = @{ x = 0; y = $Host.UI.RawUI.CursorPosition.Y-2 }
-        Sleep 1
-        $Sec--
+if (-not (Test-Path -Path $ConfigFileName)) {
+    # Config file missing; enter Setup immediately.
+    $Setup = $true
+} else {
+    # Config file exists; proceed with installation
+    $Setup = $false
+
+    # Check for Administrator privileges; if not, auto-elevate.
+    $AdminRights = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    if (-not $AdminRights) {
+        Write-Host "Restarting with Administrator rights..."
+        $CmdLine = "Set-Location '$($PSScriptRoot)'; .\$($MyInvocation.InvocationName) $($args)"
+        Start-Process powershell.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $CmdLine -Verb RunAs
+        Exit
     }
-    Write-Host ""
-    Write-Host ""
-    Write-Host ""
-    $Setup = ($Sec -gt 0)
-    If ($Setup) { $Dummy = $Host.UI.RawUI.ReadKey("NoEcho, IncludeKeyUp") }
-} Else {
-    $Setup = $True  
+
+    # Now that we're running as Administrator, wait 5 seconds.
+    # If a key is pressed during this time, activate Setup mode.
+    $timeout = 5
+    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Host "The new printer installation will start automatically in $timeout seconds."
+    Write-Host "Press any key to enter Setup (cancel the installation)."
+    while ($stopWatch.Elapsed.TotalSeconds -lt $timeout) {
+        if ([System.Console]::KeyAvailable) {
+            # Key pressed: read it and activate Setup.
+            [System.Console]::ReadKey($true) | Out-Null
+            $Setup = $true
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $stopWatch.Stop()
 }
 
 If ($Setup) {
@@ -155,15 +168,7 @@ If ($Setup) {
     Write-Host "Running this script again will install the printer automatically."
     Start-Sleep -Seconds 5
     Exit
-} Else {
-    $AdminRights = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
-    If (!$AdminRights) {
-        Write-Host "Restarting with Administrator rights..."
-        $CmdLine = "Set-Location '$($PSScriptRoot)' ; .\$($MyInvocation.InvocationName) $($args)"
-        Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -Command ""$($CmdLine)""" -Verb RunAs
-        Exit
-    }
-    
+} Else {    
     [xml]$configFile = Get-Content -Path $ConfigFileName
 
     If ($configFile.Settings.Remove.Printer -ne "") {
