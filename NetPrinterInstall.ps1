@@ -185,9 +185,24 @@ If ($Setup) {
         }
     }
 
-    Write-Host "Installing driver..."    
-    Start-Process -Wait -FilePath "pnputil.exe" -ArgumentList "/add-driver ""$($configFile.Settings.Add.InfPath)"" /install"
-    Add-PrinterDriver -Name $configFile.Settings.Add.Driver
+    $DriverFile = Join-Path $PSScriptRoot $configFile.Settings.Add.InfPath
+    try {
+        $pnputilOutput = & pnputil.exe /add-driver "$DriverFile" /install 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "pnputil error: $pnputilOutput"
+        } else {
+            Write-Host "Driver installed successfully."
+        }
+    } catch {
+        Write-Error "pnputil error: $_"
+    }
+
+    try {
+        Add-PrinterDriver -Name $configFile.Settings.Add.Driver
+    } catch {
+        Write-Error "Error Add-PrinterDriver: $_"
+    }
+
 
     Write-Host "Creating new port..."
     Add-PrinterPort -Name "IP_$($configFile.Settings.Add.Address)" -PrinterHostAddress $configFile.Settings.Add.Address -ErrorAction SilentlyContinue
