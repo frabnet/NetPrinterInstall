@@ -3,6 +3,9 @@ Write-Host "https://github.com/frabnet/NetPrinterInstall" -ForegroundColor Green
 Write-Host "---"
 Write-Host ""
 
+# INF-parsing logic
+Import-Module (Join-Path $PSScriptRoot "NetPrinterInstallParser.psm1")
+
 $ConfigFileName = Join-Path $PSScriptRoot "NetPrinterInstallConfig.xml"
 
 if (-not (Test-Path -Path $ConfigFileName)) {
@@ -16,8 +19,14 @@ if (-not (Test-Path -Path $ConfigFileName)) {
     $AdminRights = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
     if (-not $AdminRights) {
         Write-Host "Restarting with Administrator rights..."
-        $CmdLine = "Set-Location '$($PSScriptRoot)'; .\$($MyInvocation.InvocationName) $($args)"
-        Start-Process powershell.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $CmdLine -Verb RunAs
+
+        # Script's absolute path (works locally and on UNC shares),
+        $ScriptPath = $PSCommandPath
+        if ([string]::IsNullOrEmpty($ScriptPath)) { $ScriptPath = $MyInvocation.MyCommand.Path }
+
+        $ElevatedArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $args
+
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $ElevatedArgs -Verb RunAs
         Exit
     }
 
@@ -41,7 +50,7 @@ if (-not (Test-Path -Path $ConfigFileName)) {
 
 If ($Setup) {
     #https://github.com/Sebazzz/PSMenu
-    Import-Module .\PSMenu\PSMenu.psm1
+    Import-Module (Join-Path $PSScriptRoot "PSMenu\PSMenu.psm1")
 
     [xml]$configFile = "<?xml version=`"1.0`"?><Settings><Add><Address></Address><Name></Name><Driver></Driver><InfPath></InfPath><Default></Default><Color></Color><DuplexingMode></DuplexingMode></Add><Remove><Printer></Printer><Port></Port></Remove></Settings>"
 
@@ -50,12 +59,17 @@ If ($Setup) {
     Write-Host "After setup, running this script again will install the printer automatically."
     Write-Host ""
 
-    #Find default adapater IP address (for later auto-suggestion)
+    #Find default adapter IP address (for later auto-suggestion)
     $IPAddress = ( Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -ne "Disconnected" } | Select-Object -First 1 ).IPv4Address.IPAddress
-    $Bits = [System.Collections.Generic.List[System.Object]]$IPAddress.Split(".")
-    $Bits.RemoveAt(3)
-    $IPAddress = ""
-    $Bits | ForEach { $IPAddress += "$($_)." }
+    if ([string]::IsNullOrEmpty($IPAddress)) {
+        # No active adapter found
+        $IPAddress = ""
+    } else {
+        $Bits = [System.Collections.Generic.List[System.Object]]$IPAddress.Split(".")
+        $Bits.RemoveAt(3)
+        $IPAddress = ""
+        $Bits | ForEach { $IPAddress += "$($_)." }
+    }
 
     #Suggestion script block
     $Suggestion = {
@@ -73,21 +87,24 @@ If ($Setup) {
     $Drivers = @()
     While ($Drivers.Count -eq 0 ) {
         $searchTerm = Read-Host -Prompt "Enter a small part of the model number, then select the right driver"
-        Get-ChildItem -Path "*.inf" -Recurse | ForEach { 
-            $infPath = $_.FullName | Resolve-Path -Relative
-            Get-Content $infPath | ForEach {
-                #Match a printer driver
-                If ( $_ -Match ('(?<=")(.*?)(?="[ =])') ) {
-                    $Driver = $Matches.0
-                    #Match user search
-                    If ($Driver -match $SearchTerm) {                    
-                        $Drivers += [PSCustomObject]@{
-                            Name = $($Driver)
-                            InfPath = $($infPath)
-                        }
+        Get-ChildItem -Path $PSScriptRoot -Filter "*.inf" -Recurse | ForEach {
+            $infFullPath = $_.FullName
+            # Path relative to $PSScriptRoot       
+            $infPath = $infFullPath.Substring($PSScriptRoot.TrimEnd('\','/').Length).TrimStart('\','/')
+
+            # Skip INFs that aren't actual printer drivers (e.g. Class=USB or Class=Ports stubs)
+            If (-not (Test-IsPrinterInf -Path $infFullPath)) { return }
+
+            # Get-InfDriverNames returns both directly-quoted names and %Token% names resolved via [Strings] (e.g. PRINTER1="...").
+            Get-InfDriverNames -Path $infFullPath | ForEach {
+                #Match user search
+                If ( $_ -match $SearchTerm ) {
+                    $Drivers += [PSCustomObject]@{
+                        Name = $_
+                        InfPath = $infPath
                     }
                 }
-            }        
+            }
         }
         If ( $Drivers.Count -eq 0 ) {
             Write-Host "No driver found for *$($SearchTerm)* in any subfolders. Please try again."
@@ -170,6 +187,8 @@ If ($Setup) {
     Exit
 } Else {    
     [xml]$configFile = Get-Content -Path $ConfigFileName
+
+    Write-Host ""
 
     If ($configFile.Settings.Remove.Printer -ne "") {
         Get-Printer | Where Name -match $configFile.Settings.Remove.Printer | ForEach {
