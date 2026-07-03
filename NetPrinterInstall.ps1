@@ -3,6 +3,27 @@ Write-Host "https://github.com/frabnet/NetPrinterInstall" -ForegroundColor Green
 Write-Host "---"
 Write-Host ""
 
+# Prints a clear error message, gives the user time to read it, then terminates the script with a non-zero code.
+function Exit-Error {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [int]$TimeoutSeconds = 20
+    )
+    Write-Host ""
+    Write-Host "ERROR: $Message" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Closing in $TimeoutSeconds seconds. Press any key to close immediately."
+    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($stopWatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if ([System.Console]::KeyAvailable) {
+            [System.Console]::ReadKey($true) | Out-Null
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Exit 1
+}
+
 # INF-parsing logic
 Import-Module (Join-Path $PSScriptRoot "NetPrinterInstallParser.psm1")
 
@@ -86,10 +107,10 @@ If ($Setup) {
     #Search for drivers
     $Drivers = @()
     While ($Drivers.Count -eq 0 ) {
-        $searchTerm = Read-Host -Prompt "Enter a small part of the model number, then select the right driver"
+        $SearchTerm = Read-Host -Prompt "Enter a small part of the model number, then select the right driver"
         Get-ChildItem -Path $PSScriptRoot -Filter "*.inf" -Recurse | ForEach {
             $infFullPath = $_.FullName
-            # Path relative to $PSScriptRoot       
+            # Path relative to $PSScriptRoot
             $infPath = $infFullPath.Substring($PSScriptRoot.TrimEnd('\','/').Length).TrimStart('\','/')
 
             # Skip INFs that aren't actual printer drivers (e.g. Class=USB or Class=Ports stubs)
@@ -190,6 +211,7 @@ If ($Setup) {
 
     Write-Host ""
 
+    # Phase 1: Remove old printers/ports
     If ($configFile.Settings.Remove.Printer -ne "") {
         Get-Printer | Where Name -match $configFile.Settings.Remove.Printer | ForEach {
             Write-Host "Removing printer $($_.Name)..."
@@ -204,31 +226,76 @@ If ($Setup) {
         }
     }
 
+    # Phase 2: Driver install
+    # pnputil.exe return codes
+    $PNPUTIL_SUCCESS = 0
+    $PNPUTIL_NO_MORE_ITEMS = 259          #not a real error
+
     $DriverFile = Join-Path $PSScriptRoot $configFile.Settings.Add.InfPath
+    Write-Host "Installing driver package via pnputil..."
     try {
         $pnputilOutput = & pnputil.exe /add-driver "$DriverFile" /install 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "pnputil error: $pnputilOutput"
-        } else {
-            Write-Host "Driver installed successfully."
+        $pnputilExitCode = $LASTEXITCODE
+        switch ($pnputilExitCode) {
+            $PNPUTIL_SUCCESS { Write-Host "Driver package installed successfully." }
+            $PNPUTIL_NO_MORE_ITEMS { Write-Host "Driver package was already present in the driver store, continuing." -ForegroundColor Yellow }
+            default { Exit-Error "pnputil failed to install the driver package '$DriverFile' (exit code $pnputilExitCode).`n$($pnputilOutput | Out-String)" }
         }
     } catch {
-        Write-Error "pnputil error: $_"
+        Exit-Error "pnputil failed to install the driver package '$DriverFile'.`n$_"
     }
 
+    Write-Host "Registering printer driver '$($configFile.Settings.Add.Driver)'..."
     try {
-        Add-PrinterDriver -Name $configFile.Settings.Add.Driver
+        # Always call Add-PrinterDriver, even if a driver with this name is already registered: pnputil above may have just updated the driver package 
+        Add-PrinterDriver -Name $configFile.Settings.Add.Driver -ErrorAction Stop
+        Write-Host "Printer driver registered successfully."
     } catch {
-        Write-Error "Error Add-PrinterDriver: $_"
+        $StillMissing = -not (Get-PrinterDriver -Name $configFile.Settings.Add.Driver -ErrorAction SilentlyContinue)
+        if ($StillMissing) {
+            Exit-Error "Add-PrinterDriver failed for driver '$($configFile.Settings.Add.Driver)' (HResult 0x$($_.Exception.HResult.ToString('X8'))).`n$_"
+        } else {
+            Write-Host "Printer driver was already registered (or is now present), continuing." -ForegroundColor Yellow
+        }
     }
 
+    # Phase 3: Port setup
+    $PortName = "IP_$($configFile.Settings.Add.Address)"
+    $ExistingPort = Get-PrinterPort -Name $PortName -ErrorAction SilentlyContinue
+    if ($ExistingPort) {
+        # Check existence up front instead of parsing the error afterwards
+        Write-Host "Port '$PortName' already exists, continuing." -ForegroundColor Yellow
+    } else {
+        Write-Host "Creating new port '$PortName'..."
+        try {
+            Add-PrinterPort -Name $PortName -PrinterHostAddress $configFile.Settings.Add.Address -ErrorAction Stop
+            Write-Host "Port created successfully."
+        } catch {
+            Exit-Error "Add-PrinterPort failed to create port '$PortName' (HResult 0x$($_.Exception.HResult.ToString('X8'))).`n$_"
+        }
+    }
 
-    Write-Host "Creating new port..."
-    Add-PrinterPort -Name "IP_$($configFile.Settings.Add.Address)" -PrinterHostAddress $configFile.Settings.Add.Address -ErrorAction SilentlyContinue
+    # Phase 4: Printer setup
+    $ExistingPrinter = Get-Printer -Name $configFile.Settings.Add.Name -ErrorAction SilentlyContinue
+    if ($ExistingPrinter) {
+        Write-Host "Printer '$($configFile.Settings.Add.Name)' already exists, updating its driver and port..." -ForegroundColor Yellow
+        try {
+            Set-Printer -Name $configFile.Settings.Add.Name -DriverName $configFile.Settings.Add.Driver -PortName $PortName -ErrorAction Stop
+            Write-Host "Printer updated successfully."
+        } catch {
+            Exit-Error "Set-Printer failed to update printer '$($configFile.Settings.Add.Name)'.`n$_"
+        }
+    } else {
+        Write-Host "Installing printer '$($configFile.Settings.Add.Name)'..."
+        try {
+            Add-Printer -Name $($configFile.Settings.Add.Name) -DriverName $configFile.Settings.Add.Driver -PortName $PortName -ErrorAction Stop
+            Write-Host "Printer installed successfully."
+        } catch {
+            Exit-Error "Add-Printer failed to install printer '$($configFile.Settings.Add.Name)'.`n$_"
+        }
+    }
 
-    Write-Host "Installing printer..."
-    Add-Printer -Name $($configFile.Settings.Add.Name) -DriverName $configFile.Settings.Add.Driver -PortName "IP_$($configFile.Settings.Add.Address)"
-
+    # Phase 5: Printer configuration
     If ($configFile.Settings.Add.Color -ne "") {
         Write-Host "Configuring Color..."
         Set-PrintConfiguration -PrinterName $($configFile.Settings.Add.Name) -Color ($configFile.Settings.Add.Color -eq "1")
