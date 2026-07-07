@@ -24,6 +24,46 @@ function Exit-Error {
     Exit 1
 }
 
+# Registers a driver's Authenticode signer certificate in LocalMachine\TrustedPublisher.
+# Unsigned or invalidly-signed drivers are left untouched, so pnputil handles them exactly as before.
+function Add-DriverCertificateTrust {
+    param(
+        [Parameter(Mandatory = $true)][string]$InfPath
+    )
+
+    if (-not (Test-Path -Path $InfPath)) { return }
+
+    # Resolve the CatalogFile referenced in [Version], relative to the INF's own folder.
+    $infDir = Split-Path -Path $InfPath -Parent
+    $catLine = Get-Content -Path $InfPath -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^\s*CatalogFile\s*=\s*([^\s;]+)' } |
+        Select-Object -First 1
+    if (-not ($catLine -match '^\s*CatalogFile\s*=\s*([^\s;]+)')) { return }
+
+    $catPath = Join-Path -Path $infDir -ChildPath $Matches[1].Trim()
+    if (-not (Test-Path -Path $catPath)) { return }
+
+    # Get-AuthenticodeSignature also validates .cat catalog files, not just .exe/.dll.
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $catPath -ErrorAction Stop
+    } catch {
+        return
+    }
+
+    # Only trust chains Windows itself already considers valid; never force a broken signature.
+    if ($sig.Status -ne "Valid" -or -not $sig.SignerCertificate) { return }
+
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "LocalMachine")
+    try {
+        $store.Open("ReadWrite")
+        $store.Add($sig.SignerCertificate)
+    } catch {
+        Write-Host "Could not register driver publisher certificate as trusted: $_" -ForegroundColor Yellow
+    } finally {
+        $store.Close()
+    }
+}
+
 # INF-parsing logic
 Import-Module (Join-Path $PSScriptRoot "NetPrinterInstallParser.psm1")
 
@@ -232,6 +272,10 @@ If ($Setup) {
     $PNPUTIL_NO_MORE_ITEMS = 259          #not a real error
 
     $DriverFile = Join-Path $PSScriptRoot $configFile.Settings.Add.InfPath
+
+    # Pre-trust the driver's signer, if any, to avoid the interactive Device Installation prompt.
+    Add-DriverCertificateTrust -InfPath $DriverFile
+
     Write-Host "Installing driver package via pnputil..."
     try {
         $pnputilOutput = & pnputil.exe /add-driver "$DriverFile" /install 2>&1
